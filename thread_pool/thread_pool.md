@@ -88,9 +88,12 @@ auto ThreadPool::submit(F&& f, Args&&... args) {
 ```
 
 ## 优化任务队列
-- 往线程池添加任务会增加任务队列的竞争，lock-free 队列可以避免这点但存在`乒乓缓存`的问题。为此需要把任务队列拆分为线程独立的本地队列和全局队列，当线程队列无任务时就去全局队列取任务。
+- 往线程池添加任务会增加任务队列的竞争，local_thread 队列可以避免这点但存在`乒乓缓存`的问题。为此需要把任务队列拆分为线程独立的本地队列和全局队列，当线程队列无任务时就去全局队列取任务。
 
 ```C++
+#include <condition_variable>
+#include <functional>
+#include <mutex>
 #include <atomic>
 #include <future>
 #include <memory>
@@ -120,6 +123,7 @@ class ThreadPool {
 
   ~ThreadPool() {
     done_ = true;
+    cv_.notify_all();
     for (auto& x : threads_) {
       if (x.joinable()) {
         x.join();
@@ -127,40 +131,49 @@ class ThreadPool {
     }
   }
 
-  template <typename F>
-  std::future<std::invoke_result_t<F>> submit(F f) {
-    std::packaged_task<std::invoke_result_t<F>()> task(std::move(f));
-    std::future<std::invoke_result_t<F>> res(task.get_future());
-    if (local_queue_) {
-      local_queue_->push(std::move(task));
+  template <class F, class... Args>
+  auto submit(F&& f, Args&&... args) {
+    using RT = std::invoke_result_t<F, Args...>;
+    auto task = std::make_shared<std::packaged_task<RT()>>(
+        std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+    if (local_queue_ && local_queue_->size() < 1000) {
+      local_queue_->emplace([task]() { (*task)(); });
     } else {
-      pool_queue_.push(std::move(task));
+      std::lock_guard<std::mutex> l(m_);
+      pool_queue_.emplace([task]() { (*task)(); });
     }
-    return res;
+    cv_.notify_one();
+    return task->get_future();
   }
 
  private:
   void worker_thread() {
-    local_queue_.reset(new std::queue<FunctionWrapper>);
+    local_queue_.reset(new std::queue<std::function<void()>>);
     while (!done_) {
-      FunctionWrapper task;
+      std::function<void()> task;
       if (local_queue_ && !local_queue_->empty()) {
         task = std::move(local_queue_->front());
         local_queue_->pop();
         task();
-      } else if (pool_queue_.try_pop(task)) {
+        continue;
+      }
+      std::unique_lock<std::mutex> l(m_);
+      if (pool_queue_.size()) {
+        task = std::move(pool_queue_.front());
+        pool_queue_.pop();
         task();
       } else {
-        std::this_thread::yield();
+        cv_.wait(l);
       }
     }
   }
 
  private:
+  std::mutex m_;
+  std::condition_variable cv_;
   std::atomic<bool> done_ = false;
-  std::queue<std::function<void()> pool_queue_;
-  inline static thread_local std::unique_ptr<std::queue<std::function<void()>>;
-      local_queue_;
+  std::queue<std::function<void()>> pool_queue_;
+  inline static thread_local std::unique_ptr<std::queue<std::function<void()>>> local_queue_;
   std::vector<std::thread> threads_;
 };
 ```
