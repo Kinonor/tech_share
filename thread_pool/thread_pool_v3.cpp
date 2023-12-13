@@ -161,7 +161,7 @@ int main() {
 
   std::vector<std::future<int>> res;
 
-  for (int i = 0; i < 10; ++i) {
+  for (std::size_t i = 0; i < 10; ++i) {
     std::future<int> fu = pool.submit(std::bind([](int y) -> int { return y; }, i));
     res.push_back(std::move(fu));
   }
