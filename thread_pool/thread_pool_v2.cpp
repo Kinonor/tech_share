@@ -1,9 +1,9 @@
+#include <atomic>
 #include <condition_variable>
 #include <functional>
-#include <mutex>
-#include <atomic>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <thread>
 #include <type_traits>
@@ -41,8 +41,7 @@ class ThreadPool {
   template <class F, class... Args>
   auto submit(F&& f, Args&&... args) {
     using RT = std::invoke_result_t<F, Args...>;
-    auto task = std::make_shared<std::packaged_task<RT()>>(
-        std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+    auto task = std::make_shared<std::packaged_task<RT()>>(std::bind(std::forward<F>(f), std::forward<Args>(args)...));
     if (local_queue_ && local_queue_->size() < 1000) {
       local_queue_->emplace([task]() { (*task)(); });
     } else {
@@ -70,7 +69,7 @@ class ThreadPool {
         pool_queue_.pop();
         task();
       } else {
-        cv_.wait(l);
+        cv_.wait(l);  //
       }
     }
   }
@@ -84,15 +83,16 @@ class ThreadPool {
   std::vector<std::thread> threads_;
 };
 
-int main()
-{
-    ThreadPool pool;
+int main() {
+  ThreadPool pool;
 
-    for (int i = 0; i < 100000; ++i) {
-        pool.submit([](int y)->int{
-        ++y;
-        return y;
-    }, 1);
-    }
-    return 0;
+  for (int i = 0; i < 100000; ++i) {
+    pool.submit(
+        [](int y) -> int {
+          ++y;
+          return y;
+        },
+        1);
+  }
+  return 0;
 }

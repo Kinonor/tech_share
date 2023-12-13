@@ -1,10 +1,10 @@
 #include <condition_variable>
 #include <functional>
+#include <future>
 #include <mutex>
 #include <queue>
 #include <thread>
 #include <utility>
-#include <future>
 
 class ThreadPool {
  public:
@@ -19,7 +19,7 @@ class ThreadPool {
             l.unlock();
             task();
             l.lock();
-          } else if (done_) {
+          } else if (done_ && q_.empty()) {
             break;
           } else {
             cv_.wait(l);
@@ -40,11 +40,10 @@ class ThreadPool {
   template <class F, class... Args>
   auto submit(F&& f, Args&&... args) {
     using RT = std::invoke_result_t<F, Args...>;
-    auto task = std::make_shared<std::packaged_task<RT()>>(
-        std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+    auto task = std::make_shared<std::packaged_task<RT()>>(std::bind(std::forward<F>(f), std::forward<Args>(args)...));
     {
-        std::lock_guard<std::mutex> l(m_);
-        q_.emplace([task]() { (*task)(); });
+      std::lock_guard<std::mutex> l(m_);
+      q_.emplace([task]() { (*task)(); });
     }
     cv_.notify_one();
     return task->get_future();
@@ -57,15 +56,16 @@ class ThreadPool {
   std::queue<std::function<void()>> q_;
 };
 
-int main()
-{
-    ThreadPool pool(10);
+int main() {
+  ThreadPool pool(10);
 
-    for (int i = 0; i < 100000; ++i) {
-        pool.submit([](int y)->int{
-        ++y;
-        return y;
-    }, 1);
-    }
-    return 0;
+  for (int i = 0; i < 100000; ++i) {
+    pool.submit(
+        [](int y, int z, int f) -> int {
+          ++y;
+          return y;
+        },
+        1, 3, 4);
+  }
+  return 0;
 }

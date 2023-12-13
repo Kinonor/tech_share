@@ -177,3 +177,103 @@ class ThreadPool {
   std::vector<std::thread> threads_;
 };
 ```
+
+## 均匀分配任务
+- 任务分配不均，就会导致某个线程的本地队列中有很多任务，而其他线程无事可做，为此应该让没有工作的线程可以从其他线程获取任务
+
+- 单一线程的 local_queue_ 需要支持可以被其他线程拿取任务
+
+### 定义包裹函数
+- FunctionWrapper 为函数对象
+- 接受任意函数类型，内置 ImplType 接受函数
+
+```C++
+#include <memory>
+#include <utility>
+
+class FunctionWrapper {
+ public:
+  FunctionWrapper() = default;
+
+  FunctionWrapper(const FunctionWrapper&) = delete;
+
+  FunctionWrapper& operator=(const FunctionWrapper&) = delete;
+
+  FunctionWrapper(FunctionWrapper&& rhs) noexcept
+      : impl_(std::move(rhs.impl_)) {}
+
+  FunctionWrapper& operator=(FunctionWrapper&& rhs) noexcept {
+    impl_ = std::move(rhs.impl_);
+    return *this;
+  }
+
+  template <typename F>
+  FunctionWrapper(F&& f) : impl_(new ImplType<F>(std::move(f))) {}
+
+  void operator()() const { impl_->call(); }
+
+ private:
+  struct ImplBase {
+    virtual void call() = 0;
+    virtual ~ImplBase() = default;
+  };
+
+  template <typename F>
+  struct ImplType : ImplBase {
+    ImplType(F&& f) noexcept : f_(std::move(f)) {}
+    void call() override { f_(); }
+
+    F f_;
+  };
+
+ private:
+  std::unique_ptr<ImplBase> impl_;
+};
+```
+
+```C++
+class WorkStealingQueue {
+ public:
+  WorkStealingQueue() = default;
+
+  WorkStealingQueue(const WorkStealingQueue&) = delete;
+
+  WorkStealingQueue& operator=(const WorkStealingQueue&) = delete;
+
+  void push(FunctionWrapper f) {
+    std::lock_guard<std::mutex> l(m_);
+    q_.push_front(std::move(f));
+  }
+
+  bool empty() const {
+    std::lock_guard<std::mutex> l(m_);
+    return q_.empty();
+  }
+
+  bool try_pop(FunctionWrapper& res) {
+    std::lock_guard<std::mutex> l(m_);
+    if (q_.empty()) {
+      return false;
+    }
+    res = std::move(q_.front());
+    q_.pop_front();
+    return true;
+  }
+
+  bool try_steal(FunctionWrapper& res) {
+    std::lock_guard<std::mutex> l(m_);
+    if (q_.empty()) {
+      return false;
+    }
+    res = std::move(q_.back());
+    q_.pop_back();
+    return true;
+  }
+
+ private:
+  std::deque<FunctionWrapper> q_;
+  mutable std::mutex m_;
+};
+```
+
+
