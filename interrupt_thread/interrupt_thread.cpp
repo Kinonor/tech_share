@@ -12,26 +12,26 @@ class InterruptFlag {
  public:
   void set() {
     b_.store(true, std::memory_order_relaxed);
-    std::lock_guard<std::mutex> l(m_);
+    std::lock_guard<std::mutex> l(*m_);
     if (cv_) {
       cv_->notify_all();
     }
   }
   bool is_set() const { return b_.load(std::memory_order_relaxed); };
 
-  void set_condition_variable(std::condition_variable& cv) {
-    std::lock_guard<std::mutex> l(m_);
+  void set_condition_variable(std::condition_variable& cv, std::mutex& m) {
     cv_ = &cv;
+    m_ = &m;
   }
   void clear_condition_variable() {
-    std::lock_guard<std::mutex> l(m_);
+    std::lock_guard<std::mutex> l(*m_);
     cv_ = nullptr;
   }
 
  private:
   std::atomic<bool> b_;
   std::condition_variable* cv_ = nullptr;
-  std::mutex m_;
+  std::mutex* m_;
 };
 
 thread_local InterruptFlag this_thread_interrupt_flag;
@@ -48,7 +48,7 @@ void interruption_point() {
 
 void interruptible_wait(std::condition_variable& cv, std::mutex& mutex) {
   interruption_point();
-  this_thread_interrupt_flag.set_condition_variable(cv);
+ this_thread_interrupt_flag.set_condition_variable(cv, mutex);
   // 之后的 wait_for 可能抛异常，所以需要 RAII 清除标志
   ClearConditionVariableOnDestruct guard;
   interruption_point();
@@ -61,11 +61,11 @@ void interruptible_wait(std::condition_variable& cv, std::mutex& mutex) {
 template <typename Predicate>
 void interruptible_wait(std::condition_variable& cv, std::mutex& mutex, Predicate pred) {
   interruption_point();
-  this_thread_interrupt_flag.set_condition_variable(cv);
+  this_thread_interrupt_flag.set_condition_variable(cv, mutex);
   ClearConditionVariableOnDestruct guard;
   std::unique_lock<std::mutex> l(mutex);
   while (!this_thread_interrupt_flag.is_set() && !pred()) {
-    cv.wait_for(l, std::chrono::milliseconds(1));
+    cv.wait_for(l, std::chrono::milliseconds(1000));
   }
   interruption_point();
 }
@@ -103,22 +103,21 @@ class InterruptibleThread {
 };
 
 std::mutex config_mutex;
+std::condition_variable cv;
 std::vector<InterruptibleThread> background_threads;
 
 void background_thread() {
-  std::condition_variable cv;
   interruptible_wait(cv, config_mutex, []() -> bool { return false; });
-  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 }
 
+InterruptibleThread tt(background_thread);
 void start_background_processing() {
-  background_threads.push_back(InterruptibleThread(background_thread));
-  background_threads.push_back(InterruptibleThread(background_thread));
+  background_threads.push_back(tt);
 }
 
 int main() {
   start_background_processing();
-  std::unique_lock<std::mutex> l(config_mutex);
+  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   for (auto& x : background_threads) {
     x.interrupt();
   }
